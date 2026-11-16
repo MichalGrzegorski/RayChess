@@ -1,8 +1,4 @@
-# środowisko wirtualne, odtwarzalne z pyproject.toml
 .venv/
-# pliki kompilacji Pythona
 __pycache__/
-# metadane instalacji w trybie edytowalnym (pip install -e)
 *.egg-info/
-# śmieci systemu macOS
 .DS_Store

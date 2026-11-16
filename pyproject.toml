@@ -1,25 +1,26 @@
+# Project configuration: package metadata, pinned dependencies, build settings.
+
+# How to build and install the package (used by "pip install -e .").
 [build-system]
-# setuptools buduje pakiet; >=77 rozumie zapis licencji jako "MIT"
-requires = ["setuptools>=77"]
+requires = ["setuptools>=77"] 
 build-backend = "setuptools.build_meta"
 
+# Package metadata.
 [project]
 name = "raychess"
 version = "0.0.1"
-description = "Silnik szachowy: alpha-beta + NNUE uczona w self-play"
+description = "NNUE Chess Engine"
 license = "MIT"
-# Przypinamy jedną gałąź Pythona, na której wszystko sprawdzamy
 requires-python = ">=3.13,<3.14"
 dependencies = [
     "numba==0.68.1",
-    "numpy==2.5.4",  # wersję przypniemy po instalacji: weźmiemy tę, którą wybierze pip
+    "numpy==2.5.4",
 ]
 
+# Extra dependencies, installed with: pip install -e ".[train]"
 [project.optional-dependencies]
-# Tylko dla kodu w train/; silnik (raychess/) nie importuje torch
 train = ["torch==2.15.0"]
 
+# List the package explicitly instead of relying on automatic discovery.
 [tool.setuptools]
-# Jawnie: pakietem jest tylko raychess/. Bez tego setuptools zgadywałby
-# i później pomyliłby się na katalogach train/ i plikach w katalogu głównym
 packages = ["raychess"]

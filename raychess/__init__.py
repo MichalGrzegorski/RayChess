@@ -1,1 +1,1 @@
-"""RayChess: silnik szachowy (alpha-beta + NNUE)."""
+"""RayChess: NNUE Chess Engine."""
