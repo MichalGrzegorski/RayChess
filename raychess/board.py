@@ -1,5 +1,7 @@
 """Chess position: bitboards, FEN, making and unmaking moves."""
 
+import random
+
 # --- Colors ---
 WHITE = 0
 BLACK = 1
@@ -14,13 +16,15 @@ KING = 5
 
 # --- Pieces: index = color * 6 + piece type ---
 PIECE_CHARS = "PNBRQKpnbrqk"
-NO_PIECE = 12
+NO_PIECE = 12  # empty square
 
 # --- Squares: a1 = 0, b1 = 1, ..., h8 = 63 ---
-NO_SQUARE = 64
+NO_SQUARE = 64  # no en passant square
 FILE_NAMES = "abcdefgh"
 RANK_NAMES = "12345678"
 
+# 64 ones. Python integers are not fixed-width, so after a left shift
+# we mask the result with "& FULL", and instead of "~bb" we write "bb ^ FULL".
 FULL = 0xFFFF_FFFF_FFFF_FFFF
 
 # --- Castling rights: one bit per right ---
@@ -132,6 +136,18 @@ def _build_castling_mask() -> list[int]:
 
 CASTLING_MASK = _build_castling_mask()
 
+# --- Zobrist hashing: one random 64-bit number for each position feature ---
+RANDOM_SEED = 20261117  # the same keys (and hashes) in every run
+
+_rng = random.Random(RANDOM_SEED)
+
+PIECE_KEYS = [
+    [_rng.getrandbits(64) for _ in range(64)] for _ in range(12)
+]  # [piece][square]
+SIDE_KEY = _rng.getrandbits(64)  # included when Black is to move
+CASTLING_KEYS = [_rng.getrandbits(64) for _ in range(16)]  # [castling rights, 0..15]
+EP_KEYS = [_rng.getrandbits(64) for _ in range(8)]  # [file of the en passant square]
+
 
 class Board:
     """Chess position: piece bitboards, mailbox and game state."""
@@ -146,6 +162,7 @@ class Board:
         "halfmove_clock",
         "fullmove_number",
         "history",
+        "key",
     )
 
     def __init__(self) -> None:
@@ -158,7 +175,8 @@ class Board:
         self.ep_square: int = NO_SQUARE
         self.halfmove_clock: int = 0
         self.fullmove_number: int = 1
-        self.history: list[tuple[int, int, int, int]] = []
+        self.history: list[tuple[int, int, int, int, int]] = []
+        self.key: int = self.compute_key()
 
     def put_piece(self, piece: int, sq: int) -> None:
         """Place a piece on a square. The square must be empty."""
@@ -166,6 +184,7 @@ class Board:
         self.pieces[piece] |= bit
         self.occupancy[piece // 6] |= bit
         self.squares[sq] = piece
+        self.key ^= PIECE_KEYS[piece][sq]
 
     def remove_piece(self, sq: int) -> int:
         """Remove the piece from a square and return it. The square must not be empty."""
@@ -174,6 +193,7 @@ class Board:
         self.pieces[piece] ^= bit
         self.occupancy[piece // 6] ^= bit
         self.squares[sq] = NO_PIECE
+        self.key ^= PIECE_KEYS[piece][sq]
         return piece
 
     def make_move(self, move: int) -> None:
@@ -190,8 +210,11 @@ class Board:
 
         captured = self.squares[captured_sq]
         self.history.append(
-            (captured, self.castling, self.ep_square, self.halfmove_clock)
+            (captured, self.castling, self.ep_square, self.halfmove_clock, self.key)
         )
+        # Remove the old castling and en passant keys before any piece moves:
+        # _ep_key() depends on the pawns, so it must see the position before the move.
+        self.key ^= CASTLING_KEYS[self.castling] ^ self._ep_key()
 
         if captured != NO_PIECE:
             self.remove_piece(captured_sq)
@@ -218,6 +241,8 @@ class Board:
         if us == BLACK:
             self.fullmove_number += 1
         self.side = us ^ 1
+        # Add the new castling and en passant keys; the side to move always changes.
+        self.key ^= CASTLING_KEYS[self.castling] ^ self._ep_key() ^ SIDE_KEY
 
     def unmake_move(self, move: int) -> None:
         """Take back a move played by make_move. Moves must be taken back in reverse order."""
@@ -225,7 +250,7 @@ class Board:
         to_sq = move_to(move)
         flag = move_flag(move)
 
-        captured, self.castling, self.ep_square, self.halfmove_clock = (
+        captured, self.castling, self.ep_square, self.halfmove_clock, key = (
             self.history.pop()
         )
         self.side ^= 1
@@ -249,6 +274,34 @@ class Board:
             else:
                 captured_sq = to_sq
             self.put_piece(captured, captured_sq)
+        # Restore the hash last: put_piece and remove_piece above have changed self.key.
+        self.key = key
+
+    def _ep_key(self) -> int:
+        """Zobrist key of the en passant square, or 0 if no en passant capture is possible."""
+        if self.ep_square == NO_SQUARE:
+            return 0
+        file = self.ep_square % 8
+        pushed_sq = self.ep_square - 8 if self.side == WHITE else self.ep_square + 8
+        our_pawns = self.pieces[self.side * 6 + PAWN]
+        if file > 0 and our_pawns & (1 << (pushed_sq - 1)):
+            return EP_KEYS[file]
+        if file < 7 and our_pawns & (1 << (pushed_sq + 1)):
+            return EP_KEYS[file]
+        return 0
+
+    def compute_key(self) -> int:
+        """Zobrist hash computed from scratch. The incremental key must always equal it."""
+        key = 0
+        for sq in range(64):
+            piece = self.squares[sq]
+            if piece != NO_PIECE:
+                key ^= PIECE_KEYS[piece][sq]
+        if self.side == BLACK:
+            key ^= SIDE_KEY
+        key ^= CASTLING_KEYS[self.castling]
+        key ^= self._ep_key()
+        return key
 
     @classmethod
     def from_fen(cls, fen: str) -> "Board":
@@ -274,6 +327,7 @@ class Board:
         board.ep_square = NO_SQUARE if ep == "-" else parse_square(ep)
         board.halfmove_clock = int(halfmove)
         board.fullmove_number = int(fullmove)
+        board.key = board.compute_key()
         return board
 
     def _place_pieces_from_fen(self, placement: str) -> None:
