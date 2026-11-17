@@ -1,4 +1,4 @@
-"""Chess position: bitboards, FEN parsing, board printing."""
+"""Chess position: bitboards, FEN, making and unmaking moves."""
 
 # --- Colors ---
 WHITE = 0
@@ -33,6 +33,26 @@ BLACK_QUEENSIDE = 8
 CASTLING_CHARS = "KQkq"
 STARTING_FEN = "rnbqkbnr/pppppppp/8/8/8/8/PPPPPPPP/RNBQKBNR w KQkq - 0 1"
 
+# --- Move flags (bits 12-15 of a move) ---
+QUIET = 0
+DOUBLE_PAWN_PUSH = 1
+KING_CASTLE = 2
+QUEEN_CASTLE = 3
+CAPTURE = 4
+EN_PASSANT = 5
+KNIGHT_PROMOTION = 8
+BISHOP_PROMOTION = 9
+ROOK_PROMOTION = 10
+QUEEN_PROMOTION = 11
+KNIGHT_PROMOTION_CAPTURE = 12
+BISHOP_PROMOTION_CAPTURE = 13
+ROOK_PROMOTION_CAPTURE = 14
+QUEEN_PROMOTION_CAPTURE = 15
+
+CAPTURE_BIT = 4
+PROMOTION_BIT = 8
+NO_MOVE = 0
+
 
 def square_name(sq: int) -> str:
     """Square index -> name, e.g. 28 -> 'e4'."""
@@ -57,6 +77,62 @@ def castling_string(castling: int) -> str:
     return result or "-"
 
 
+def encode_move(from_sq: int, to_sq: int, flag: int = QUIET) -> int:
+    """Pack a move into one int: from (bits 0-5), to (bits 6-11), flag (bits 12-15)."""
+    return from_sq | (to_sq << 6) | (flag << 12)
+
+
+def move_from(move: int) -> int:
+    """Origin square of a move."""
+    return move & 0x3F
+
+
+def move_to(move: int) -> int:
+    """Destination square of a move."""
+    return (move >> 6) & 0x3F
+
+
+def move_flag(move: int) -> int:
+    """Flag of a move (QUIET, CAPTURE, ...)."""
+    return move >> 12
+
+
+def promotion_type(flag: int) -> int:
+    """Piece type a pawn promotes to, for a promotion flag (8-15)."""
+    return KNIGHT + (flag & 3)
+
+
+def move_to_uci(move: int) -> str:
+    """Move in UCI notation, e.g. 'e2e4' or 'e7e8q'."""
+    if move == NO_MOVE:
+        return "0000"
+    text = square_name(move_from(move)) + square_name(move_to(move))
+    flag = move_flag(move)
+    if flag & PROMOTION_BIT:
+        text += "nbrq"[flag & 3]
+    return text
+
+
+ALL_CASTLING = (
+    WHITE_KINGSIDE | WHITE_QUEENSIDE | BLACK_KINGSIDE | BLACK_QUEENSIDE
+)  # == 1 = 0001 | 2 = 0010 | 4 = 0100 | 8 = 1000  ==  1111  =  15
+
+
+def _build_castling_mask() -> list[int]:
+    """For each square: castling rights that survive a move from or to that square."""
+    mask = [ALL_CASTLING] * 64
+    mask[parse_square("e1")] = ALL_CASTLING ^ (WHITE_KINGSIDE | WHITE_QUEENSIDE)
+    mask[parse_square("h1")] = ALL_CASTLING ^ WHITE_KINGSIDE
+    mask[parse_square("a1")] = ALL_CASTLING ^ WHITE_QUEENSIDE
+    mask[parse_square("e8")] = ALL_CASTLING ^ (BLACK_KINGSIDE | BLACK_QUEENSIDE)
+    mask[parse_square("h8")] = ALL_CASTLING ^ BLACK_KINGSIDE
+    mask[parse_square("a8")] = ALL_CASTLING ^ BLACK_QUEENSIDE
+    return mask
+
+
+CASTLING_MASK = _build_castling_mask()
+
+
 class Board:
     """Chess position: piece bitboards, mailbox and game state."""
 
@@ -69,6 +145,7 @@ class Board:
         "ep_square",
         "halfmove_clock",
         "fullmove_number",
+        "history",
     )
 
     def __init__(self) -> None:
@@ -81,6 +158,7 @@ class Board:
         self.ep_square: int = NO_SQUARE
         self.halfmove_clock: int = 0
         self.fullmove_number: int = 1
+        self.history: list[tuple[int, int, int, int]] = []
 
     def put_piece(self, piece: int, sq: int) -> None:
         """Place a piece on a square. The square must be empty."""
@@ -97,6 +175,80 @@ class Board:
         self.occupancy[piece // 6] ^= bit
         self.squares[sq] = NO_PIECE
         return piece
+
+    def make_move(self, move: int) -> None:
+        """Play a move. The move is assumed to be legal; it is not checked here."""
+        from_sq = move_from(move)
+        to_sq = move_to(move)
+        flag = move_flag(move)
+        us = self.side
+
+        if flag == EN_PASSANT:
+            captured_sq = to_sq - 8 if us == WHITE else to_sq + 8
+        else:
+            captured_sq = to_sq
+
+        captured = self.squares[captured_sq]
+        self.history.append(
+            (captured, self.castling, self.ep_square, self.halfmove_clock)
+        )
+
+        if captured != NO_PIECE:
+            self.remove_piece(captured_sq)
+        piece = self.remove_piece(from_sq)
+        if flag & PROMOTION_BIT:
+            self.put_piece(us * 6 + promotion_type(flag), to_sq)
+        else:
+            self.put_piece(piece, to_sq)
+
+        if flag == KING_CASTLE:
+            self.put_piece(self.remove_piece(to_sq + 1), to_sq - 1)
+        elif flag == QUEEN_CASTLE:
+            self.put_piece(self.remove_piece(to_sq - 2), to_sq + 1)
+
+        self.castling &= CASTLING_MASK[from_sq] & CASTLING_MASK[to_sq]
+        if flag == DOUBLE_PAWN_PUSH:
+            self.ep_square = (from_sq + to_sq) // 2
+        else:
+            self.ep_square = NO_SQUARE
+        if piece % 6 == PAWN or captured != NO_PIECE:
+            self.halfmove_clock = 0
+        else:
+            self.halfmove_clock += 1
+        if us == BLACK:
+            self.fullmove_number += 1
+        self.side = us ^ 1
+
+    def unmake_move(self, move: int) -> None:
+        """Take back a move played by make_move. Moves must be taken back in reverse order."""
+        from_sq = move_from(move)
+        to_sq = move_to(move)
+        flag = move_flag(move)
+
+        captured, self.castling, self.ep_square, self.halfmove_clock = (
+            self.history.pop()
+        )
+        self.side ^= 1
+        us = self.side
+        if us == BLACK:
+            self.fullmove_number -= 1
+
+        if flag == KING_CASTLE:
+            self.put_piece(self.remove_piece(to_sq - 1), to_sq + 1)
+        elif flag == QUEEN_CASTLE:
+            self.put_piece(self.remove_piece(to_sq + 1), to_sq - 2)
+
+        piece = self.remove_piece(to_sq)
+        if flag & PROMOTION_BIT:
+            piece = us * 6 + PAWN
+        self.put_piece(piece, from_sq)
+
+        if captured != NO_PIECE:
+            if flag == EN_PASSANT:
+                captured_sq = to_sq - 8 if us == WHITE else to_sq + 8
+            else:
+                captured_sq = to_sq
+            self.put_piece(captured, captured_sq)
 
     @classmethod
     def from_fen(cls, fen: str) -> "Board":
