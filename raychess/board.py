@@ -81,6 +81,18 @@ def castling_string(castling: int) -> str:
     return result or "-"
 
 
+def bitboard_string(bb: int) -> str:
+    """Bitboard as an 8x8 diagram (rank 8 at the top): 'x' = bit set, '.' = bit clear."""
+    lines = []
+    for rank in range(7, -1, -1):
+        row = []
+        for file in range(8):
+            row.append("x" if bb & (1 << (rank * 8 + file)) else ".")
+        lines.append(RANK_NAMES[rank] + "  " + " ".join(row))
+    lines.append("   " + " ".join(FILE_NAMES))
+    return "\n".join(lines)
+
+
 def encode_move(from_sq: int, to_sq: int, flag: int = QUIET) -> int:
     """Pack a move into one int: from (bits 0-5), to (bits 6-11), flag (bits 12-15)."""
     return from_sq | (to_sq << 6) | (flag << 12)
