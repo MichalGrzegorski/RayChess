@@ -1,6 +1,7 @@
 """Chess position: bitboards, FEN, making and unmaking moves."""
 
 import random
+from collections.abc import Iterator
 
 # --- Colors ---
 WHITE = 0
@@ -91,6 +92,14 @@ def bitboard_string(bb: int) -> str:
         lines.append(RANK_NAMES[rank] + "  " + " ".join(row))
     lines.append("   " + " ".join(FILE_NAMES))
     return "\n".join(lines)
+
+
+def iter_squares(bb: int) -> Iterator[int]:
+    """Yield the squares of the set bits of a bitboard, from a1 towards h8."""
+    while bb:
+        lowest = bb & -bb  # bitboard with only the lowest set bit
+        yield lowest.bit_length() - 1
+        bb ^= lowest  # clear that bit
 
 
 def encode_move(from_sq: int, to_sq: int, flag: int = QUIET) -> int:
